@@ -1,0 +1,15 @@
+[package]
+name = "shex-cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+shex-ast = { path = "../shex-ast" }
+shex-lexer = { path = "../shex-lexer" }
+shex-parser = { path = "../shex-parser" }
+shex-interpreter = { path = "../shex-interpreter" }
+clap = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

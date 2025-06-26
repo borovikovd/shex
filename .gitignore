@@ -1,0 +1,39 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+
+# Generated files
+**/*.orig
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+
+# Test artifacts
+*.profraw
+
+# Development/experimental files
+phase0
+test_logos.rs
+shex_spec.md
+
+# Environment files
+.env
+.env.local
+
+# Coverage reports
+lcov.info
+coverage/
+
+# Backup files
+*~

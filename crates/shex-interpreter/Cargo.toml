@@ -1,0 +1,11 @@
+[package]
+name = "shex-interpreter"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+shex-ast = { path = "../shex-ast" }
+shex-parser = { path = "../shex-parser" }
+shex-lexer = { path = "../shex-lexer" }
+thiserror = { workspace = true }
+anyhow = { workspace = true }

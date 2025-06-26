@@ -1,0 +1,57 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[package]
+name = "shex"
+version = "0.1.0"
+edition = "2021"
+authors = ["Shex Contributors"]
+license = "MIT"
+description = "A modern, safe POSIX shell interpreter with JSON support and block scoping"
+homepage = "https://github.com/borovikovd/shex"
+repository = "https://github.com/borovikovd/shex"
+keywords = ["shell", "posix", "interpreter", "cli", "json"]
+categories = ["command-line-utilities", "parser-implementations"]
+readme = "README.md"
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
+
+[[test]]
+name = "e2e"
+path = "tests/e2e.rs"
+
+[dependencies]
+shex-lexer = { path = "crates/shex-lexer" }
+shex-parser = { path = "crates/shex-parser" }
+shex-interpreter = { path = "crates/shex-interpreter" }
+shex-ast = { path = "crates/shex-ast" }
+tempfile = "*"
+
+[workspace.dependencies]
+# Lexical analysis
+logos = "*"
+
+# Parsing
+lalrpop-util = "*"
+lalrpop = "*"
+
+# JSON handling
+serde_json = "*"
+
+# CLI
+clap = "*"
+
+# Error handling
+thiserror = "*"
+anyhow = "*"
+
+# Testing
+proptest = "*"
+criterion = "*"
+tempfile = "*"
+
+# Utilities
+once_cell = "*"

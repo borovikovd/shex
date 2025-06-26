@@ -1,0 +1,247 @@
+use shex_ast::{Command, Program, Span, Spanned};
+use shex_lexer::{SpannedToken, Token};
+use crate::{combine_args, extract_assignments, token_to_string};
+
+grammar;
+
+extern {
+    type Location = usize;
+    type Error = ();
+    
+    enum SpannedToken {
+        // POSIX Basic Tokens
+        Word => SpannedToken { token: Token::Word, .. },
+        Number => SpannedToken { token: Token::Number, .. },
+        String => SpannedToken { token: Token::String, .. },
+        AssignmentWord => SpannedToken { token: Token::AssignmentWord, .. },
+        Newline => SpannedToken { token: Token::Newline, .. },
+
+        // POSIX Multi-character Operators
+        AndIf => SpannedToken { token: Token::AndIf, .. },
+        OrIf => SpannedToken { token: Token::OrIf, .. },
+        Dsemi => SpannedToken { token: Token::Dsemi, .. },
+        Dless => SpannedToken { token: Token::Dless, .. },
+        Dgreat => SpannedToken { token: Token::Dgreat, .. },
+        Lessand => SpannedToken { token: Token::Lessand, .. },
+        Greatand => SpannedToken { token: Token::Greatand, .. },
+        Lessgreat => SpannedToken { token: Token::Lessgreat, .. },
+        Dlessdash => SpannedToken { token: Token::Dlessdash, .. },
+        Clobber => SpannedToken { token: Token::Clobber, .. },
+
+        // POSIX Reserved Words
+        If => SpannedToken { token: Token::If, .. },
+        Then => SpannedToken { token: Token::Then, .. },
+        Else => SpannedToken { token: Token::Else, .. },
+        Elif => SpannedToken { token: Token::Elif, .. },
+        Fi => SpannedToken { token: Token::Fi, .. },
+        Do => SpannedToken { token: Token::Do, .. },
+        Done => SpannedToken { token: Token::Done, .. },
+        Case => SpannedToken { token: Token::Case, .. },
+        Esac => SpannedToken { token: Token::Esac, .. },
+        While => SpannedToken { token: Token::While, .. },
+        Until => SpannedToken { token: Token::Until, .. },
+        For => SpannedToken { token: Token::For, .. },
+        In => SpannedToken { token: Token::In, .. },
+        Lbrace => SpannedToken { token: Token::Lbrace, .. },
+        Rbrace => SpannedToken { token: Token::Rbrace, .. },
+        Bang => SpannedToken { token: Token::Bang, .. },
+
+        // Single-character operators
+        Pipe => SpannedToken { token: Token::Pipe, .. },
+        Semicolon => SpannedToken { token: Token::Semicolon, .. },
+        Ampersand => SpannedToken { token: Token::Ampersand, .. },
+        Less => SpannedToken { token: Token::Less, .. },
+        Great => SpannedToken { token: Token::Great, .. },
+        Lparen => SpannedToken { token: Token::Lparen, .. },
+        Rparen => SpannedToken { token: Token::Rparen, .. },
+        LeftBracket => SpannedToken { token: Token::LeftBracket, .. },
+        RightBracket => SpannedToken { token: Token::RightBracket, .. },
+        Dash => SpannedToken { token: Token::Dash, .. },
+        Dot => SpannedToken { token: Token::Dot, .. },
+
+        // Shex Extensions
+        SimpleParameterExpansion => SpannedToken { token: Token::SimpleParameterExpansion, .. },
+        ParameterExpansion => SpannedToken { token: Token::ParameterExpansion, .. },
+
+        Eof => SpannedToken { token: Token::Eof, .. },
+    }
+}
+
+pub Program: Program = {
+    // Empty program
+    Eof => Program { commands: vec![] },
+    // Complete command structure following POSIX hierarchy
+    <cmd:CompleteCommand> Eof => {
+        Program { 
+            commands: vec![cmd]
+        }
+    },
+};
+
+// POSIX complete_command: implements the full command hierarchy
+CompleteCommand: Spanned<Command> = {
+    List,
+    <l:@L> <list:List> Semicolon <r:@R> => {
+        // Handle trailing semicolon
+        list
+    },
+    <l:@L> <list:List> Ampersand <r:@R> => {
+        // Background execution
+        Spanned::new(
+            Command::Background { command: Box::new(list) },
+            Span::new(l, r)
+        )
+    },
+};
+
+// POSIX list: handles sequential execution (cmd1; cmd2; cmd3)
+List: Spanned<Command> = {
+    AndOr,
+    <l:@L> <list:List> Semicolon <cmd:AndOr> <r:@R> => {
+        // Sequential execution
+        match list.node {
+            Command::Sequence { mut commands } => {
+                commands.push(cmd);
+                Spanned::new(Command::Sequence { commands }, Span::new(l, r))
+            }
+            _ => {
+                Spanned::new(
+                    Command::Sequence { commands: vec![list, cmd] },
+                    Span::new(l, r)
+                )
+            }
+        }
+    },
+};
+
+// POSIX and_or: handles logical operators (&& and ||)
+AndOr: Spanned<Command> = {
+    Pipeline,
+    <l:@L> <left:AndOr> AndIf <right:Pipeline> <r:@R> => {
+        Spanned::new(
+            Command::AndIf { 
+                left: Box::new(left), 
+                right: Box::new(right) 
+            },
+            Span::new(l, r)
+        )
+    },
+    <l:@L> <left:AndOr> OrIf <right:Pipeline> <r:@R> => {
+        Spanned::new(
+            Command::OrIf { 
+                left: Box::new(left), 
+                right: Box::new(right) 
+            },
+            Span::new(l, r)
+        )
+    },
+};
+
+// POSIX pipeline: handles pipe sequences (cmd1 | cmd2 | cmd3)
+Pipeline: Spanned<Command> = {
+    SimpleCommand,
+    <l:@L> <left:Pipeline> Pipe <right:SimpleCommand> <r:@R> => {
+        // Build pipeline
+        match left.node {
+            Command::Pipeline { mut commands } => {
+                commands.push(right);
+                Spanned::new(Command::Pipeline { commands }, Span::new(l, r))
+            }
+            _ => {
+                Spanned::new(
+                    Command::Pipeline { commands: vec![left, right] },
+                    Span::new(l, r)
+                )
+            }
+        }
+    },
+};
+
+// POSIX simple_command with cmd_prefix support
+SimpleCommand: Spanned<Command> = {
+    // cmd_prefix cmd_word cmd_suffix
+    <l:@L> <prefix:CmdPrefix> <name:Word> <suffix:CmdSuffix> <r:@R> => {
+        Spanned::new(
+            Command::Simple { 
+                name: name.text.clone(), 
+                args: combine_args(prefix.clone(), suffix),
+                assignments: extract_assignments(prefix)
+            },
+            Span::new(l, r)
+        )
+    },
+    // cmd_prefix cmd_word  
+    <l:@L> <prefix:CmdPrefix> <name:Word> <r:@R> => {
+        Spanned::new(
+            Command::Simple { 
+                name: name.text.clone(), 
+                args: combine_args(prefix.clone(), vec![]),
+                assignments: extract_assignments(prefix)
+            },
+            Span::new(l, r)
+        )
+    },
+    // cmd_prefix (assignment-only, no command)
+    <l:@L> <prefix:CmdPrefix> <r:@R> => {
+        Spanned::new(
+            Command::Assignment { 
+                assignments: extract_assignments(prefix)
+            },
+            Span::new(l, r)
+        )
+    },
+    // cmd_name cmd_suffix
+    <l:@L> <name:Word> <suffix:CmdSuffix> <r:@R> => {
+        Spanned::new(
+            Command::Simple { 
+                name: name.text.clone(), 
+                args: suffix.into_iter().map(token_to_string).collect(),
+                assignments: vec![]
+            },
+            Span::new(l, r)
+        )
+    },
+    // cmd_name
+    <l:@L> <name:Word> <r:@R> => {
+        Spanned::new(
+            Command::Simple { 
+                name: name.text.clone(), 
+                args: vec![],
+                assignments: vec![]
+            },
+            Span::new(l, r)
+        )
+    },
+};
+
+CmdPrefix: Vec<SpannedToken> = {
+    Assignment => vec![<>],
+    <mut prefix:CmdPrefix> <assign:Assignment> => {
+        prefix.push(assign);
+        prefix
+    },
+};
+
+CmdSuffix: Vec<SpannedToken> = {
+    Arg => vec![<>],
+    <mut suffix:CmdSuffix> <arg:Arg> => {
+        suffix.push(arg);
+        suffix
+    },
+};
+
+Arg: SpannedToken = {
+    Word => <>,
+    Number => <>,
+    String => <>,
+    SimpleParameterExpansion => <>,
+    ParameterExpansion => <>,
+    LeftBracket => <>,
+    RightBracket => <>,
+    Dash => <>,
+    Dot => <>,
+}
+
+Assignment: SpannedToken = {
+    AssignmentWord => <>,
+}
