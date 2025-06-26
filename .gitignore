@@ -25,7 +25,6 @@ Thumbs.db
 # Development/experimental files
 phase0
 test_logos.rs
-shex_spec.md
 
 # Environment files
 .env
