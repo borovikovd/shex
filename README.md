@@ -18,16 +18,18 @@ A modern, safe implementation of a POSIX-compliant shell interpreter written in 
 # Clone and build
 git clone https://github.com/borovikovd/shex.git
 cd shex
-cargo build --release
+cargo build -p shex-cli       # Build CLI (required first)
+cargo test --workspace        # Run all tests
 
-# Run interactive shell
-./target/release/shex-cli
+# Run commands
+./target/debug/shex-cli -c "echo hello world"
 
-# Execute commands
-./target/release/shex-cli -c "echo hello world"
+# Run script files  
+./target/debug/shex-cli script.sh
 
-# Run script files
-./target/release/shex-cli script.sh
+# Build release version
+cargo build --release -p shex-cli
+./target/release/shex-cli -c "echo 'Production ready!'"
 ```
 
 ## Features
@@ -105,12 +107,22 @@ cargo test -p shex-interpreter # Interpreter tests
 
 ### Building
 ```bash
-cargo build                    # Debug build
-cargo build --release         # Release build
+# Clean build and test (recommended after clone)
+cargo clean
+cargo build -p shex-cli       # Build CLI binary (required for e2e tests)
 cargo test --workspace        # Run all tests
+
+# Development commands
+cargo build                   # Debug build
+cargo build --release         # Release build
 cargo clippy --workspace      # Lint code
 cargo fmt --all              # Format code
 ```
+
+### Important Notes
+- **E2E Tests**: The CLI binary (`target/debug/shex-cli`) must be built before running e2e tests
+- **Clean Builds**: After `cargo clean`, run `cargo build -p shex-cli` before testing
+- **Test Order**: Build CLI first, then run `cargo test --workspace` for complete test suite
 
 ### Project Philosophy
 - **Ship working code early**: Incremental development with working features
