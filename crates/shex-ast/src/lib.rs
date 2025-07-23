@@ -89,17 +89,55 @@ pub struct Program {
     pub commands: Vec<Spanned<Command>>,
 }
 
+/// Type of I/O redirection
+#[derive(Debug, Clone)]
+pub enum RedirectionKind {
+    /// < file (stdin from file)
+    Input,
+    /// > file (stdout to file)
+    Output,
+    /// >> file (stdout append to file)
+    Append,
+    /// << delimiter (here-document)
+    HereDoc { delimiter: String, text: String },
+    /// <<- delimiter (here-document with tab stripping)
+    HereDocDash { delimiter: String, text: String },
+    /// <& fd (duplicate input fd)
+    InputDup,
+    /// >& fd (duplicate output fd)
+    OutputDup,
+    /// <> file (open for reading and writing)
+    InputOutput,
+    /// >| file (clobber)
+    Clobber,
+}
+
+/// I/O redirection
+#[derive(Debug, Clone)]
+pub struct Redirection {
+    /// File descriptor number (None means default: 0 for input, 1 for output)
+    pub fd: Option<i32>,
+    /// Type of redirection
+    pub kind: RedirectionKind,
+    /// Target (filename or fd number)
+    pub target: String,
+}
+
 /// A shell command - follows POSIX command hierarchy
 #[derive(Debug, Clone)]
 pub enum Command {
-    /// Simple command: echo hello (with optional prefix assignments)
+    /// Simple command: echo hello (with optional prefix assignments and redirections)
     Simple {
         name: String,
         args: Vec<String>,
         assignments: Vec<(String, String)>,
+        redirections: Vec<Redirection>,
     },
     /// Pipeline: cmd1 | cmd2 | cmd3
-    Pipeline { commands: Vec<Spanned<Command>> },
+    Pipeline { 
+        commands: Vec<Spanned<Command>>,
+        redirections: Vec<Redirection>,
+    },
     /// Variable assignment(s): var1=value1 var2=value2
     Assignment { assignments: Vec<(String, String)> },
     /// Logical AND: cmd1 && cmd2
@@ -223,6 +261,7 @@ mod tests {
             name: "echo".to_string(),
             args: vec!["hello".to_string()],
             assignments: vec![],
+            redirections: vec![],
         };
         let spanned = Spanned::new(cmd, Span::new(0, 10));
         assert_eq!(spanned.span.start, 0);

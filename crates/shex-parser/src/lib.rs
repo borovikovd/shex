@@ -169,6 +169,7 @@ mod tests {
                 name,
                 args,
                 assignments,
+                redirections: _,
             } => {
                 assert_eq!(name, "echo");
                 assert_eq!(args, &["hello"]);
@@ -190,6 +191,7 @@ mod tests {
                 name,
                 args,
                 assignments,
+                redirections: _,
             } => {
                 assert_eq!(name, "echo");
                 assert_eq!(args, &["hello", "world test", "$var", "${other:-default}"]);
@@ -210,6 +212,7 @@ mod tests {
                 name,
                 args,
                 assignments,
+                redirections: _,
             } => {
                 assert_eq!(name, "echo");
                 assert_eq!(args, &["hello", "$name"]);
@@ -236,7 +239,7 @@ mod tests {
 
         assert_eq!(program.commands.len(), 1);
         match &program.commands[0].node {
-            Command::Pipeline { commands } => {
+            Command::Pipeline { commands, redirections: _ } => {
                 assert_eq!(commands.len(), 2);
                 // First command should be "echo hello"
                 match &commands[0].node {

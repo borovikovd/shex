@@ -1,4 +1,4 @@
-use shex_ast::{Command, Program, Span, Spanned};
+use shex_ast::{Command, Program, Span, Spanned, Redirection, RedirectionKind};
 use shex_lexer::{SpannedToken, Token};
 use crate::{combine_args, extract_assignments, token_to_string};
 
@@ -143,13 +143,13 @@ Pipeline: Spanned<Command> = {
     <l:@L> <left:Pipeline> Pipe <right:SimpleCommand> <r:@R> => {
         // Build pipeline
         match left.node {
-            Command::Pipeline { mut commands } => {
+            Command::Pipeline { mut commands, redirections } => {
                 commands.push(right);
-                Spanned::new(Command::Pipeline { commands }, Span::new(l, r))
+                Spanned::new(Command::Pipeline { commands, redirections }, Span::new(l, r))
             }
             _ => {
                 Spanned::new(
-                    Command::Pipeline { commands: vec![left, right] },
+                    Command::Pipeline { commands: vec![left, right], redirections: vec![] },
                     Span::new(l, r)
                 )
             }
@@ -157,15 +157,18 @@ Pipeline: Spanned<Command> = {
     },
 };
 
-// POSIX simple_command with cmd_prefix support
+// POSIX simple_command with cmd_prefix support including redirections
 SimpleCommand: Spanned<Command> = {
     // cmd_prefix cmd_word cmd_suffix
     <l:@L> <prefix:CmdPrefix> <name:Word> <suffix:CmdSuffix> <r:@R> => {
+        let mut redirections = prefix.1.clone();
+        redirections.extend(suffix.1.clone());
         Spanned::new(
             Command::Simple { 
                 name: name.text.clone(), 
-                args: combine_args(prefix.clone(), suffix),
-                assignments: extract_assignments(prefix)
+                args: combine_args(prefix.0.clone(), suffix.0),
+                assignments: extract_assignments(prefix.0),
+                redirections
             },
             Span::new(l, r)
         )
@@ -175,17 +178,22 @@ SimpleCommand: Spanned<Command> = {
         Spanned::new(
             Command::Simple { 
                 name: name.text.clone(), 
-                args: combine_args(prefix.clone(), vec![]),
-                assignments: extract_assignments(prefix)
+                args: combine_args(prefix.0.clone(), vec![]),
+                assignments: extract_assignments(prefix.0),
+                redirections: prefix.1
             },
             Span::new(l, r)
         )
     },
     // cmd_prefix (assignment-only, no command)
     <l:@L> <prefix:CmdPrefix> <r:@R> => {
+        // If there are only redirections, it's an error
+        if prefix.0.is_empty() && !prefix.1.is_empty() {
+            panic!("Redirections without command are not allowed");
+        }
         Spanned::new(
             Command::Assignment { 
-                assignments: extract_assignments(prefix)
+                assignments: extract_assignments(prefix.0)
             },
             Span::new(l, r)
         )
@@ -195,8 +203,9 @@ SimpleCommand: Spanned<Command> = {
         Spanned::new(
             Command::Simple { 
                 name: name.text.clone(), 
-                args: suffix.into_iter().map(token_to_string).collect(),
-                assignments: vec![]
+                args: suffix.0.into_iter().map(token_to_string).collect(),
+                assignments: vec![],
+                redirections: suffix.1
             },
             Span::new(l, r)
         )
@@ -207,25 +216,38 @@ SimpleCommand: Spanned<Command> = {
             Command::Simple { 
                 name: name.text.clone(), 
                 args: vec![],
-                assignments: vec![]
+                assignments: vec![],
+                redirections: vec![]
             },
             Span::new(l, r)
         )
     },
 };
 
-CmdPrefix: Vec<SpannedToken> = {
-    Assignment => vec![<>],
+// Update CmdPrefix to support redirections
+CmdPrefix: (Vec<SpannedToken>, Vec<Redirection>) = {
+    Assignment => (vec![<>], vec![]),
+    IoRedirect => (vec![], vec![<>]),
     <mut prefix:CmdPrefix> <assign:Assignment> => {
-        prefix.push(assign);
+        prefix.0.push(assign);
+        prefix
+    },
+    <mut prefix:CmdPrefix> <redirect:IoRedirect> => {
+        prefix.1.push(redirect);
         prefix
     },
 };
 
-CmdSuffix: Vec<SpannedToken> = {
-    Arg => vec![<>],
+// Update CmdSuffix to support redirections
+CmdSuffix: (Vec<SpannedToken>, Vec<Redirection>) = {
+    Arg => (vec![<>], vec![]),
+    IoRedirect => (vec![], vec![<>]),
     <mut suffix:CmdSuffix> <arg:Arg> => {
-        suffix.push(arg);
+        suffix.0.push(arg);
+        suffix
+    },
+    <mut suffix:CmdSuffix> <redirect:IoRedirect> => {
+        suffix.1.push(redirect);
         suffix
     },
 };
@@ -244,4 +266,60 @@ Arg: SpannedToken = {
 
 Assignment: SpannedToken = {
     AssignmentWord => <>,
+}
+
+// I/O Redirection grammar
+IoRedirect: Redirection = {
+    // < filename
+    <l:@L> Less <target:Word> <r:@R> => Redirection {
+        fd: None,
+        kind: RedirectionKind::Input,
+        target: target.text,
+    },
+    // > filename
+    <l:@L> Great <target:Word> <r:@R> => Redirection {
+        fd: None,
+        kind: RedirectionKind::Output,
+        target: target.text,
+    },
+    // >> filename
+    <l:@L> Dgreat <target:Word> <r:@R> => Redirection {
+        fd: None,
+        kind: RedirectionKind::Append,
+        target: target.text,
+    },
+    // <& fd
+    <l:@L> Lessand <target:Word> <r:@R> => Redirection {
+        fd: None,
+        kind: RedirectionKind::InputDup,
+        target: target.text,
+    },
+    // >& fd
+    <l:@L> Greatand <target:Word> <r:@R> => Redirection {
+        fd: None,
+        kind: RedirectionKind::OutputDup,
+        target: target.text,
+    },
+    // <> filename
+    <l:@L> Lessgreat <target:Word> <r:@R> => Redirection {
+        fd: None,
+        kind: RedirectionKind::InputOutput,
+        target: target.text,
+    },
+    // >| filename
+    <l:@L> Clobber <target:Word> <r:@R> => Redirection {
+        fd: None,
+        kind: RedirectionKind::Clobber,
+        target: target.text,
+    },
+    // TODO: Add support for fd-prefixed redirections (e.g., 2>, 2>&1)
+    // TODO: Add support for here-documents (<< and <<-)
+}
+
+RedirectList: Vec<Redirection> = {
+    <redirect:IoRedirect> => vec![redirect],
+    <mut list:RedirectList> <redirect:IoRedirect> => {
+        list.push(redirect);
+        list
+    },
 }

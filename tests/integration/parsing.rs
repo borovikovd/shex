@@ -15,10 +15,12 @@ fn test_lexer_parser_simple_command() {
             name,
             args,
             assignments,
+            redirections,
         } => {
             assert_eq!(name, "echo");
             assert_eq!(args, &["hello"]);
             assert!(assignments.is_empty());
+            assert!(redirections.is_empty());
         }
         _ => panic!("Expected simple command"),
     }

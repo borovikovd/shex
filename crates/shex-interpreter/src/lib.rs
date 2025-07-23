@@ -2,9 +2,10 @@
 //!
 //! Simple command execution for basic shell functionality.
 
-use shex_ast::{Command, Program, ShexError, SourceMap, Spanned};
+use shex_ast::{Command, Program, ShexError, SourceMap, Spanned, Redirection, RedirectionKind};
 use shex_parser::string_utils::{parse_parameter_expansion, parse_simple_parameter_expansion};
 use shex_parser::variable_resolver::{ResolutionResult, VariableContext, resolve_expansion};
+use std::fs::File;
 use std::process::{Command as StdCommand, Stdio};
 
 pub struct Interpreter {
@@ -64,8 +65,9 @@ impl Interpreter {
                 name,
                 args,
                 assignments,
-            } => self.execute_simple_command(name, args, assignments, command.span),
-            Command::Pipeline { commands } => self.execute_pipeline(commands, command.span),
+                redirections,
+            } => self.execute_simple_command(name, args, assignments, redirections, command.span),
+            Command::Pipeline { commands, redirections } => self.execute_pipeline(commands, redirections, command.span),
             Command::Assignment { assignments } => {
                 self.execute_assignments(assignments);
                 Ok(ExitStatus {
@@ -86,6 +88,7 @@ impl Interpreter {
         name: &str,
         args: &[String],
         assignments: &[(String, String)],
+        redirections: &[Redirection],
         span: shex_ast::Span,
     ) -> Result<ExitStatus, ShexError> {
         // First, process prefix assignments
@@ -117,8 +120,17 @@ impl Interpreter {
                 // Try to execute external command
                 let mut cmd = StdCommand::new(name);
                 cmd.args(&expanded_args);
-                cmd.stdout(Stdio::piped());
-                cmd.stderr(Stdio::piped());
+                
+                // Apply redirections
+                self.apply_redirections(&mut cmd, redirections)?;
+
+                // Default to piped if no redirections specified
+                if redirections.is_empty() || !redirections.iter().any(|r| matches!(r.kind, RedirectionKind::Output | RedirectionKind::Append | RedirectionKind::Clobber)) {
+                    cmd.stdout(Stdio::piped());
+                }
+                if redirections.is_empty() || !redirections.iter().any(|r| matches!(r.kind, RedirectionKind::OutputDup) && r.fd == Some(2)) {
+                    cmd.stderr(Stdio::piped());
+                }
 
                 if let Ok(output) = cmd.output() {
                     Ok(ExitStatus {
@@ -226,6 +238,7 @@ impl Interpreter {
     fn execute_pipeline(
         &mut self,
         commands: &[Spanned<Command>],
+        _redirections: &[Redirection],
         _span: shex_ast::Span,
     ) -> Result<ExitStatus, ShexError> {
         // For now, just execute commands sequentially without actual piping
@@ -318,6 +331,74 @@ impl Interpreter {
             stderr: String::new(),
         })
     }
+
+    /// Apply I/O redirections to a command
+    fn apply_redirections(&self, cmd: &mut StdCommand, redirections: &[Redirection]) -> Result<(), ShexError> {
+        for redirection in redirections {
+            match &redirection.kind {
+                RedirectionKind::Input => {
+                    // < file - redirect stdin from file
+                    match File::open(&redirection.target) {
+                        Ok(file) => {
+                            cmd.stdin(Stdio::from(file));
+                        }
+                        Err(_) => {
+                            let source_map = SourceMap::new("");
+                            return Err(ShexError::syntax(
+                                format!("Cannot open {} for input", redirection.target),
+                                shex_ast::Span::dummy(),
+                                &source_map,
+                                "<interpreter>",
+                            ));
+                        }
+                    }
+                }
+                RedirectionKind::Output => {
+                    // > file - redirect stdout to file (truncate)
+                    match File::create(&redirection.target) {
+                        Ok(file) => {
+                            cmd.stdout(Stdio::from(file));
+                        }
+                        Err(_) => {
+                            let source_map = SourceMap::new("");
+                            return Err(ShexError::syntax(
+                                format!("Cannot create {}", redirection.target),
+                                shex_ast::Span::dummy(),
+                                &source_map,
+                                "<interpreter>",
+                            ));
+                        }
+                    }
+                }
+                RedirectionKind::Append => {
+                    // >> file - redirect stdout to file (append)
+                    match std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&redirection.target)
+                    {
+                        Ok(file) => {
+                            cmd.stdout(Stdio::from(file));
+                        }
+                        Err(_) => {
+                            let source_map = SourceMap::new("");
+                            return Err(ShexError::syntax(
+                                format!("Cannot open {} for append", redirection.target),
+                                shex_ast::Span::dummy(),
+                                &source_map,
+                                "<interpreter>",
+                            ));
+                        }
+                    }
+                }
+                // TODO: Implement other redirection types
+                _ => {
+                    // For now, ignore unsupported redirection types
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Default for Interpreter {
@@ -340,6 +421,7 @@ mod tests {
                     .map(std::string::ToString::to_string)
                     .collect(),
                 assignments: vec![],
+                redirections: vec![],
             },
             Span::dummy(),
         )
@@ -578,6 +660,7 @@ mod tests {
                     name: "echo".to_string(),
                     args: vec!["hello".to_string(), "$name".to_string()],
                     assignments: vec![("name".to_string(), "world".to_string())],
+                    redirections: vec![],
                 },
                 Span::dummy(),
             )],
@@ -817,6 +900,7 @@ mod tests {
                         make_simple_command("echo", vec!["hello"]),
                         make_simple_command("echo", vec!["world"]),
                     ],
+                    redirections: vec![],
                 },
                 Span::dummy(),
             )],
@@ -999,6 +1083,7 @@ mod tests {
                             name: "echo".to_string(),
                             args: vec!["$var".to_string()],
                             assignments: vec![("var".to_string(), "hello".to_string())],
+                            redirections: vec![],
                         },
                         Span::dummy(),
                     )),
