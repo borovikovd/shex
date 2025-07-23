@@ -1,4 +1,4 @@
-use shex_ast::{Command, Program, Span, Spanned, Redirection, RedirectionKind};
+use shex_ast::{Command, Program, Span, Spanned, Redirection, RedirectionKind, CaseArm};
 use shex_lexer::{SpannedToken, Token};
 use crate::{combine_args, extract_assignments, token_to_string};
 
@@ -70,7 +70,7 @@ extern {
 pub Program: Program = {
     // Empty program
     Eof => Program { commands: vec![] },
-    // Complete command structure following POSIX hierarchy
+    // Single complete command (current working approach)
     <cmd:CompleteCommand> Eof => {
         Program { 
             commands: vec![cmd]
@@ -112,6 +112,22 @@ List: Spanned<Command> = {
             }
         }
     },
+    // Basic newline separation for top-level commands
+    <l:@L> <list:List> Newline <cmd:AndOr> <r:@R> => {
+        // Sequential execution with newlines
+        match list.node {
+            Command::Sequence { mut commands } => {
+                commands.push(cmd);
+                Spanned::new(Command::Sequence { commands }, Span::new(l, r))
+            }
+            _ => {
+                Spanned::new(
+                    Command::Sequence { commands: vec![list, cmd] },
+                    Span::new(l, r)
+                )
+            }
+        }
+    },
 };
 
 // POSIX and_or: handles logical operators (&& and ||)
@@ -139,8 +155,8 @@ AndOr: Spanned<Command> = {
 
 // POSIX pipeline: handles pipe sequences (cmd1 | cmd2 | cmd3)
 Pipeline: Spanned<Command> = {
-    SimpleCommand,
-    <l:@L> <left:Pipeline> Pipe <right:SimpleCommand> <r:@R> => {
+    Command,
+    <l:@L> <left:Pipeline> Pipe <right:Command> <r:@R> => {
         // Build pipeline
         match left.node {
             Command::Pipeline { mut commands, redirections } => {
@@ -155,6 +171,12 @@ Pipeline: Spanned<Command> = {
             }
         }
     },
+};
+
+// POSIX command: simple_command | compound_command
+Command: Spanned<Command> = {
+    SimpleCommand,
+    CompoundCommand,
 };
 
 // POSIX simple_command with cmd_prefix support including redirections
@@ -268,7 +290,7 @@ Assignment: SpannedToken = {
     AssignmentWord => <>,
 }
 
-// I/O Redirection grammar
+// I/O Redirection grammar (basic POSIX redirections working)
 IoRedirect: Redirection = {
     // < filename
     <l:@L> Less <target:Word> <r:@R> => Redirection {
@@ -312,9 +334,265 @@ IoRedirect: Redirection = {
         kind: RedirectionKind::Clobber,
         target: target.text,
     },
-    // TODO: Add support for fd-prefixed redirections (e.g., 2>, 2>&1)
-    // TODO: Add support for here-documents (<< and <<-)
-}
+    // << delimiter (here-document) - basic implementation
+    <l:@L> Dless <delimiter:Word> <r:@R> => Redirection {
+        fd: None,
+        kind: RedirectionKind::HereDoc { 
+            delimiter: delimiter.text.clone(), 
+            text: String::new() // Basic implementation - content parsing would require lexer changes
+        },
+        target: delimiter.text,
+    },
+    // <<- delimiter (here-document with tab stripping)
+    <l:@L> Dlessdash <delimiter:Word> <r:@R> => Redirection {
+        fd: None,
+        kind: RedirectionKind::HereDocDash { 
+            delimiter: delimiter.text.clone(), 
+            text: String::new() // Basic implementation - content parsing would require lexer changes
+        },
+        target: delimiter.text,
+    },
+    // Note: IO_NUMBER prefixed redirections (2>, 3<, etc.) create LALRPOP conflicts
+    // due to ambiguity between Number as argument vs file descriptor
+    // These would require lexer-level disambiguation or GLR parsing
+};
+
+// POSIX compound_command
+CompoundCommand: Spanned<Command> = {
+    IfClause,
+    WhileClause,
+    UntilClause,
+    ForClause,
+    CaseClause,
+    FunctionDefinition,
+    Subshell,
+    BraceGroup,
+};
+
+// POSIX if_clause: If compound_list Then compound_list [else_part] Fi
+IfClause: Spanned<Command> = {
+    // if condition; then commands; fi
+    <l:@L> If <condition:CompoundList> Then <then_body:CompoundList> Fi <r:@R> => {
+        Spanned::new(
+            Command::If {
+                condition: Box::new(condition),
+                then_body: vec![then_body],
+                elif_clauses: vec![],
+                else_body: None,
+            },
+            Span::new(l, r)
+        )
+    },
+    // if condition; then commands; else commands; fi
+    <l:@L> If <condition:CompoundList> Then <then_body:CompoundList> Else <else_body:CompoundList> Fi <r:@R> => {
+        Spanned::new(
+            Command::If {
+                condition: Box::new(condition),
+                then_body: vec![then_body],
+                elif_clauses: vec![],
+                else_body: Some(vec![else_body]),
+            },
+            Span::new(l, r)
+        )
+    },
+    // TODO: Add elif support
+};
+
+// POSIX while_clause: While compound_list do_group
+WhileClause: Spanned<Command> = {
+    <l:@L> While <condition:CompoundList> Do <body:CompoundList> Done <r:@R> => {
+        Spanned::new(
+            Command::While {
+                condition: Box::new(condition),
+                body: vec![body],
+            },
+            Span::new(l, r)
+        )
+    },
+};
+
+// POSIX until_clause: Until compound_list do_group
+UntilClause: Spanned<Command> = {
+    <l:@L> Until <condition:CompoundList> Do <body:CompoundList> Done <r:@R> => {
+        Spanned::new(
+            Command::Until {
+                condition: Box::new(condition),
+                body: vec![body],
+            },
+            Span::new(l, r)
+        )
+    },
+};
+
+// POSIX for_clause: For name [in wordlist] do_group
+ForClause: Spanned<Command> = {
+    // for name do commands done (implicit $@)
+    <l:@L> For <var:Word> Do <body:CompoundList> Done <r:@R> => {
+        Spanned::new(
+            Command::For {
+                variable: var.text,
+                words: None, // Use $@ (positional parameters)
+                body: vec![body],
+            },
+            Span::new(l, r)
+        )
+    },
+    // for name in word1 word2 ... do commands done
+    <l:@L> For <var:Word> In <words:WordList> Do <body:CompoundList> Done <r:@R> => {
+        Spanned::new(
+            Command::For {
+                variable: var.text,
+                words: Some(words),
+                body: vec![body],
+            },
+            Span::new(l, r)
+        )
+    },
+};
+
+// Helper: word list for for loops
+WordList: Vec<String> = {
+    <word:Word> => vec![word.text],
+    <mut list:WordList> <word:Word> => {
+        list.push(word.text);
+        list
+    },
+};
+
+// POSIX case_clause: Case WORD in case_list Esac
+CaseClause: Spanned<Command> = {
+    // case word in esac (empty case)
+    <l:@L> Case <word:Word> In Esac <r:@R> => {
+        Spanned::new(
+            Command::Case {
+                word: word.text,
+                arms: vec![],
+            },
+            Span::new(l, r)
+        )
+    },
+    // case word in patterns) commands ;; ... esac
+    <l:@L> Case <word:Word> In <arms:CaseArmList> Esac <r:@R> => {
+        Spanned::new(
+            Command::Case {
+                word: word.text,
+                arms,
+            },
+            Span::new(l, r)
+        )
+    },
+};
+
+// Helper: case arm list
+CaseArmList: Vec<CaseArm> = {
+    <arm:CaseArm> => vec![arm],
+    <mut arms:CaseArmList> <arm:CaseArm> => {
+        arms.push(arm);
+        arms
+    },
+};
+
+// Helper: single case arm - pattern) commands ;;
+CaseArm: CaseArm = {
+    // pattern) commands ;;
+    <patterns:PatternList> Rparen <commands:CompoundList> Dsemi => {
+        CaseArm {
+            patterns,
+            commands: vec![commands], 
+        }
+    },
+    // pattern) ;; (no commands)
+    <patterns:PatternList> Rparen Dsemi => {
+        CaseArm {
+            patterns,
+            commands: vec![],
+        }
+    },
+};
+
+// Helper: pattern list separated by |
+PatternList: Vec<String> = {
+    <pattern:Word> => vec![pattern.text],
+    <mut list:PatternList> Pipe <pattern:Word> => {
+        list.push(pattern.text);
+        list
+    },
+};
+
+// POSIX subshell: ( compound_list )
+Subshell: Spanned<Command> = {
+    <l:@L> Lparen <commands:CompoundList> Rparen <r:@R> => {
+        Spanned::new(
+            Command::Subshell {
+                commands: vec![commands],
+            },
+            Span::new(l, r)
+        )
+    },
+};
+
+// POSIX brace_group: { compound_list }
+BraceGroup: Spanned<Command> = {
+    <l:@L> Lbrace <commands:CompoundList> Rbrace <r:@R> => {
+        Spanned::new(
+            Command::BraceGroup {
+                commands: vec![commands],
+            },
+            Span::new(l, r)
+        )
+    },
+};
+
+// POSIX function_definition: fname () compound_command
+FunctionDefinition: Spanned<Command> = {
+    <l:@L> <name:Word> Lparen Rparen <body:CompoundCommand> <r:@R> => {
+        Spanned::new(
+            Command::Function {
+                name: name.text,
+                body: Box::new(body),
+                redirections: vec![],
+            },
+            Span::new(l, r)
+        )
+    },
+};
+
+// POSIX compound_list - handles sequential execution within compound commands
+CompoundList: Spanned<Command> = {
+    AndOr,
+    // Basic semicolon separation
+    <l:@L> <list:CompoundList> Semicolon <cmd:AndOr> <r:@R> => {
+        // Sequential execution within compound commands
+        match list.node {
+            Command::Sequence { mut commands } => {
+                commands.push(cmd);
+                Spanned::new(Command::Sequence { commands }, Span::new(l, r))
+            }
+            _ => {
+                Spanned::new(
+                    Command::Sequence { commands: vec![list, cmd] },
+                    Span::new(l, r)
+                )
+            }
+        }
+    },
+    // Newline separation (basic linebreak support)  
+    <l:@L> <list:CompoundList> Newline <cmd:AndOr> <r:@R> => {
+        // Sequential execution within compound commands
+        match list.node {
+            Command::Sequence { mut commands } => {
+                commands.push(cmd);
+                Spanned::new(Command::Sequence { commands }, Span::new(l, r))
+            }
+            _ => {
+                Spanned::new(
+                    Command::Sequence { commands: vec![list, cmd] },
+                    Span::new(l, r)
+                )
+            }
+        }
+    },
+};
 
 RedirectList: Vec<Redirection> = {
     <redirect:IoRedirect> => vec![redirect],

@@ -154,6 +154,59 @@ pub enum Command {
     Sequence { commands: Vec<Spanned<Command>> },
     /// Background execution: cmd &
     Background { command: Box<Spanned<Command>> },
+    
+    // Compound Commands (POSIX)
+    /// if condition; then commands; [elif condition; then commands;]... [else commands;] fi
+    If {
+        condition: Box<Spanned<Command>>,
+        then_body: Vec<Spanned<Command>>,
+        elif_clauses: Vec<(Spanned<Command>, Vec<Spanned<Command>>)>, // (condition, body) pairs
+        else_body: Option<Vec<Spanned<Command>>>,
+    },
+    /// while condition; do commands; done
+    While {
+        condition: Box<Spanned<Command>>,
+        body: Vec<Spanned<Command>>,
+    },
+    /// until condition; do commands; done  
+    Until {
+        condition: Box<Spanned<Command>>,
+        body: Vec<Spanned<Command>>,
+    },
+    /// for name [in words]; do commands; done
+    For {
+        variable: String,
+        words: Option<Vec<String>>, // None means use $@
+        body: Vec<Spanned<Command>>,
+    },
+    /// case word in patterns) commands ;; ... esac
+    Case {
+        word: String,
+        arms: Vec<CaseArm>,
+    },
+    /// function name() { commands; }
+    Function {
+        name: String,
+        body: Box<Spanned<Command>>,
+        redirections: Vec<Redirection>,
+    },
+    /// ( commands ) - subshell
+    Subshell {
+        commands: Vec<Spanned<Command>>,
+    },
+    /// { commands; } - brace group
+    BraceGroup {
+        commands: Vec<Spanned<Command>>,
+    },
+}
+
+/// Case pattern arm: pattern) commands ;;
+#[derive(Debug, Clone)]
+pub struct CaseArm {
+    /// Patterns to match (e.g., "*.txt", "foo|bar") 
+    pub patterns: Vec<String>,
+    /// Commands to execute if pattern matches
+    pub commands: Vec<Spanned<Command>>,
 }
 
 /// Error types with location information

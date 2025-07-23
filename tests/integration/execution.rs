@@ -93,3 +93,17 @@ fn test_complex_command_chain() {
     // Should return the last successful command's output
     assert_eq!(result.stdout, "third\n");
 }
+
+#[test]
+fn test_function_definition_execution() {
+    let parser = Parser::new("testfunc() { echo function executed }").unwrap();
+    let program = parser.parse().unwrap();
+    let mut interpreter = Interpreter::new();
+
+    // Execute the function definition (should just define the function)
+    let result = interpreter.execute(program).unwrap();
+    assert_eq!(result.code, 0);
+    
+    // TODO: Test function invocation when function calling is implemented
+    // For now, just verify the definition was successful
+}

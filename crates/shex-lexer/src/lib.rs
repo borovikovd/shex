@@ -30,7 +30,7 @@ pub enum Token {
     #[token(".")]
     Dot,
 
-    /// Number token (including IO_NUMBER)
+    /// Number token (can be IO_NUMBER in context)
     #[regex(r"[0-9]+")]
     Number,
 

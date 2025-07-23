@@ -11,3 +11,4 @@ lalrpop-util = { version = "0.22", default-features = false }
 
 [build-dependencies]
 lalrpop = "0.22"
+

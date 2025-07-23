@@ -2,7 +2,7 @@
 //!
 //! Simple command execution for basic shell functionality.
 
-use shex_ast::{Command, Program, ShexError, SourceMap, Spanned, Redirection, RedirectionKind};
+use shex_ast::{Command, Program, ShexError, SourceMap, Spanned, Redirection, RedirectionKind, CaseArm};
 use shex_parser::string_utils::{parse_parameter_expansion, parse_simple_parameter_expansion};
 use shex_parser::variable_resolver::{ResolutionResult, VariableContext, resolve_expansion};
 use std::fs::File;
@@ -80,6 +80,30 @@ impl Interpreter {
             Command::OrIf { left, right } => self.execute_or_if(left, right, command.span),
             Command::Sequence { commands } => self.execute_sequence(commands, command.span),
             Command::Background { command } => self.execute_background(command, command.span),
+            Command::If { condition, then_body, elif_clauses, else_body } => {
+                self.execute_if(condition, then_body, elif_clauses, else_body, command.span)
+            }
+            Command::While { condition, body } => {
+                self.execute_while(condition, body, command.span)
+            }
+            Command::Until { condition, body } => {
+                self.execute_until(condition, body, command.span)
+            }
+            Command::For { variable, words, body } => {
+                self.execute_for(variable, words, body, command.span)
+            }
+            Command::Case { word, arms } => {
+                self.execute_case(word, arms, command.span)
+            }
+            Command::Function { name, body, redirections } => {
+                self.execute_function_definition(name, body, redirections, command.span)
+            }
+            Command::Subshell { commands } => {
+                self.execute_subshell(commands, command.span)
+            }
+            Command::BraceGroup { commands } => {
+                self.execute_brace_group(commands, command.span)
+            }
         }
     }
 
@@ -398,6 +422,218 @@ impl Interpreter {
             }
         }
         Ok(())
+    }
+
+    /// Execute if/then/else/fi control structure
+    fn execute_if(
+        &mut self,
+        condition: &Spanned<Command>,
+        then_body: &[Spanned<Command>],
+        elif_clauses: &[(Spanned<Command>, Vec<Spanned<Command>>)],
+        else_body: &Option<Vec<Spanned<Command>>>,
+        _span: shex_ast::Span,
+    ) -> Result<ExitStatus, ShexError> {
+        // Execute condition
+        let condition_result = self.execute_command(condition)?;
+        
+        if condition_result.code == 0 {
+            // Condition succeeded, execute then body
+            self.execute_command_list(then_body)
+        } else {
+            // Check elif clauses
+            for (elif_condition, elif_body) in elif_clauses {
+                let elif_result = self.execute_command(elif_condition)?;
+                if elif_result.code == 0 {
+                    return self.execute_command_list(elif_body);
+                }
+            }
+            
+            // Execute else body if present
+            if let Some(else_commands) = else_body {
+                self.execute_command_list(else_commands)
+            } else {
+                // No else clause, return success
+                Ok(ExitStatus {
+                    code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                })
+            }
+        }
+    }
+
+    /// Execute while/do/done loop
+    fn execute_while(
+        &mut self,
+        condition: &Spanned<Command>,
+        body: &[Spanned<Command>],
+        _span: shex_ast::Span,
+    ) -> Result<ExitStatus, ShexError> {
+        let mut last_result = ExitStatus {
+            code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        };
+
+        loop {
+            // Check condition
+            let condition_result = self.execute_command(condition)?;
+            if condition_result.code != 0 {
+                break; // Condition failed, exit loop
+            }
+
+            // Execute body
+            last_result = self.execute_command_list(body)?;
+        }
+
+        Ok(last_result)
+    }
+
+    /// Execute until/do/done loop
+    fn execute_until(
+        &mut self,
+        condition: &Spanned<Command>,
+        body: &[Spanned<Command>],
+        _span: shex_ast::Span,
+    ) -> Result<ExitStatus, ShexError> {
+        let mut last_result = ExitStatus {
+            code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        };
+
+        loop {
+            // Check condition (until loops when condition fails)
+            let condition_result = self.execute_command(condition)?;
+            if condition_result.code == 0 {
+                break; // Condition succeeded, exit loop
+            }
+
+            // Execute body
+            last_result = self.execute_command_list(body)?;
+        }
+
+        Ok(last_result)
+    }
+
+    /// Execute for/in/do/done loop
+    fn execute_for(
+        &mut self,
+        variable: &str,
+        words: &Option<Vec<String>>,
+        body: &[Spanned<Command>],
+        _span: shex_ast::Span,
+    ) -> Result<ExitStatus, ShexError> {
+        let mut last_result = ExitStatus {
+            code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        };
+
+        // Get words to iterate over
+        let word_list = if let Some(words) = words {
+            words.clone()
+        } else {
+            // Default to $@ (positional parameters) - for now use empty list
+            vec![]
+        };
+
+        // Execute body for each word
+        for word in word_list {
+            // Set loop variable
+            self.variable_context.set(variable.to_string(), word);
+            
+            // Execute body
+            last_result = self.execute_command_list(body)?;
+        }
+
+        Ok(last_result)
+    }
+
+    /// Execute case/esac pattern matching
+    fn execute_case(
+        &mut self,
+        word: &str,
+        arms: &[CaseArm],
+        _span: shex_ast::Span,
+    ) -> Result<ExitStatus, ShexError> {
+        // Expand the word
+        let expanded_word = self.expand_single_argument(word, shex_ast::Span::dummy())?;
+        
+        // Try each case arm
+        for arm in arms {
+            for pattern in &arm.patterns {
+                if self.pattern_matches(pattern, &expanded_word) {
+                    return self.execute_command_list(&arm.commands);
+                }
+            }
+        }
+
+        // No pattern matched
+        Ok(ExitStatus {
+            code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        })
+    }
+
+    /// Execute function definition
+    fn execute_function_definition(
+        &mut self,
+        _name: &str,
+        _body: &Spanned<Command>,
+        _redirections: &[Redirection],
+        _span: shex_ast::Span,
+    ) -> Result<ExitStatus, ShexError> {
+        // TODO: Implement function storage and calling
+        Ok(ExitStatus {
+            code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        })
+    }
+
+    /// Execute subshell
+    fn execute_subshell(
+        &mut self,
+        commands: &[Spanned<Command>],
+        _span: shex_ast::Span,
+    ) -> Result<ExitStatus, ShexError> {
+        // TODO: Implement proper subshell with separate environment
+        // For now, just execute commands in current context
+        self.execute_command_list(commands)
+    }
+
+    /// Execute brace group
+    fn execute_brace_group(
+        &mut self,
+        commands: &[Spanned<Command>],
+        _span: shex_ast::Span,
+    ) -> Result<ExitStatus, ShexError> {
+        // Brace groups execute in current shell context
+        self.execute_command_list(commands)
+    }
+
+    /// Helper: Execute a list of commands
+    fn execute_command_list(&mut self, commands: &[Spanned<Command>]) -> Result<ExitStatus, ShexError> {
+        let mut last_result = ExitStatus {
+            code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        };
+
+        for command in commands {
+            last_result = self.execute_command(command)?;
+        }
+
+        Ok(last_result)
+    }
+
+    /// Helper: Simple pattern matching for case statements
+    fn pattern_matches(&self, pattern: &str, word: &str) -> bool {
+        // Very basic pattern matching - just exact match for now
+        // TODO: Implement proper shell pattern matching with * and ?
+        pattern == word
     }
 }
 
@@ -1096,5 +1332,282 @@ mod tests {
         let result = interpreter.execute(program).unwrap();
         assert_eq!(result.code, 0);
         assert_eq!(result.stdout, "world\n");
+    }
+
+    #[test]
+    fn test_if_statement_true_condition() {
+        let mut interpreter = Interpreter::new();
+
+        // Test: if true; then echo "success"; fi
+        let program = Program {
+            commands: vec![Spanned::new(
+                Command::If {
+                    condition: Box::new(make_simple_command("true", vec![])),
+                    then_body: vec![make_simple_command("echo", vec!["success"])],
+                    elif_clauses: vec![],
+                    else_body: None,
+                },
+                Span::dummy(),
+            )],
+        };
+
+        let result = interpreter.execute(program).unwrap();
+        assert_eq!(result.code, 0);
+        assert_eq!(result.stdout, "success\n");
+    }
+
+    #[test]
+    fn test_if_statement_false_condition() {
+        let mut interpreter = Interpreter::new();
+
+        // Test: if false; then echo "fail"; fi
+        let program = Program {
+            commands: vec![Spanned::new(
+                Command::If {
+                    condition: Box::new(make_simple_command("false", vec![])),
+                    then_body: vec![make_simple_command("echo", vec!["fail"])],
+                    elif_clauses: vec![],
+                    else_body: None,
+                },
+                Span::dummy(),
+            )],
+        };
+
+        let result = interpreter.execute(program).unwrap();
+        assert_eq!(result.code, 0); // if statement itself succeeds
+        assert_eq!(result.stdout, ""); // but then body is not executed
+    }
+
+    #[test]
+    fn test_if_else_statement() {
+        let mut interpreter = Interpreter::new();
+
+        // Test: if false; then echo "fail"; else echo "success"; fi
+        let program = Program {
+            commands: vec![Spanned::new(
+                Command::If {
+                    condition: Box::new(make_simple_command("false", vec![])),
+                    then_body: vec![make_simple_command("echo", vec!["fail"])],
+                    elif_clauses: vec![],
+                    else_body: Some(vec![make_simple_command("echo", vec!["success"])]),
+                },
+                Span::dummy(),
+            )],
+        };
+
+        let result = interpreter.execute(program).unwrap();
+        assert_eq!(result.code, 0);
+        assert_eq!(result.stdout, "success\n");
+    }
+
+    #[test]
+    fn test_while_loop() {
+        let mut interpreter = Interpreter::new();
+        
+        // Set up a counter variable
+        interpreter.variable_context.set("count".to_string(), "0".to_string());
+
+        // Test: while [ $count -lt 3 ]; do echo $count; count=$((count+1)); done
+        // Simplified: while false; do echo "never"; done (should not execute body)
+        let program = Program {
+            commands: vec![Spanned::new(
+                Command::While {
+                    condition: Box::new(make_simple_command("false", vec![])),
+                    body: vec![make_simple_command("echo", vec!["never"])],
+                },
+                Span::dummy(),
+            )],
+        };
+
+        let result = interpreter.execute(program).unwrap();
+        assert_eq!(result.code, 0);
+        assert_eq!(result.stdout, ""); // Body never executed
+    }
+
+    #[test]
+    fn test_for_loop_with_words() {
+        let mut interpreter = Interpreter::new();
+
+        // Test: for item in apple banana cherry; do echo $item; done
+        let program = Program {
+            commands: vec![Spanned::new(
+                Command::For {
+                    variable: "item".to_string(),
+                    words: Some(vec!["apple".to_string(), "banana".to_string(), "cherry".to_string()]),
+                    body: vec![make_simple_command("echo", vec!["$item"])],
+                },
+                Span::dummy(),
+            )],
+        };
+
+        let result = interpreter.execute(program).unwrap();
+        assert_eq!(result.code, 0);
+        // Should execute echo for each item: apple, banana, cherry
+        assert_eq!(result.stdout, "cherry\n"); // Last iteration result
+    }
+
+    #[test]
+    fn test_for_loop_empty_list() {
+        let mut interpreter = Interpreter::new();
+
+        // Test: for item in; do echo $item; done (empty word list)
+        let program = Program {
+            commands: vec![Spanned::new(
+                Command::For {
+                    variable: "item".to_string(),
+                    words: Some(vec![]), // Empty list
+                    body: vec![make_simple_command("echo", vec!["never"])],
+                },
+                Span::dummy(),
+            )],
+        };
+
+        let result = interpreter.execute(program).unwrap();
+        assert_eq!(result.code, 0);
+        assert_eq!(result.stdout, ""); // Body never executed
+    }
+
+    #[test]
+    fn test_case_statement_match() {
+        let mut interpreter = Interpreter::new();
+
+        // Test: case "apple" in apple) echo "fruit" ;; esac
+        let program = Program {
+            commands: vec![Spanned::new(
+                Command::Case {
+                    word: "apple".to_string(),
+                    arms: vec![
+                        CaseArm {
+                            patterns: vec!["apple".to_string()],
+                            commands: vec![make_simple_command("echo", vec!["fruit"])],
+                        },
+                        CaseArm {
+                            patterns: vec!["*".to_string()],
+                            commands: vec![make_simple_command("echo", vec!["other"])],
+                        },
+                    ],
+                },
+                Span::dummy(),
+            )],
+        };
+
+        let result = interpreter.execute(program).unwrap();
+        assert_eq!(result.code, 0);
+        assert_eq!(result.stdout, "fruit\n"); // First pattern matches
+    }
+
+    #[test]
+    fn test_case_statement_no_match() {
+        let mut interpreter = Interpreter::new();
+
+        // Test: case "banana" in apple) echo "fruit" ;; esac
+        let program = Program {
+            commands: vec![Spanned::new(
+                Command::Case {
+                    word: "banana".to_string(),
+                    arms: vec![
+                        CaseArm {
+                            patterns: vec!["apple".to_string()],
+                            commands: vec![make_simple_command("echo", vec!["fruit"])],
+                        },
+                    ],
+                },
+                Span::dummy(),
+            )],
+        };
+
+        let result = interpreter.execute(program).unwrap();
+        assert_eq!(result.code, 0);
+        assert_eq!(result.stdout, ""); // No pattern matches
+    }
+
+    #[test]
+    fn test_case_statement_multiple_patterns() {
+        let mut interpreter = Interpreter::new();
+
+        // Test: case "banana" in apple|banana|cherry) echo "fruit" ;; esac
+        let program = Program {
+            commands: vec![Spanned::new(
+                Command::Case {
+                    word: "banana".to_string(),
+                    arms: vec![
+                        CaseArm {
+                            patterns: vec!["apple".to_string(), "banana".to_string(), "cherry".to_string()],
+                            commands: vec![make_simple_command("echo", vec!["fruit"])],
+                        },
+                    ],
+                },
+                Span::dummy(),
+            )],
+        };
+
+        let result = interpreter.execute(program).unwrap();
+        assert_eq!(result.code, 0);
+        assert_eq!(result.stdout, "fruit\n"); // Second pattern matches
+    }
+
+    #[test] 
+    fn test_subshell_execution() {
+        let mut interpreter = Interpreter::new();
+
+        // Test: (echo "in subshell")
+        let program = Program {
+            commands: vec![Spanned::new(
+                Command::Subshell {
+                    commands: vec![make_simple_command("echo", vec!["in subshell"])],
+                },
+                Span::dummy(),
+            )],
+        };
+
+        let result = interpreter.execute(program).unwrap();
+        assert_eq!(result.code, 0);
+        assert_eq!(result.stdout, "in subshell\n");
+    }
+
+    #[test]
+    fn test_brace_group_execution() {
+        let mut interpreter = Interpreter::new();
+
+        // Test: { echo "in brace group"; }
+        let program = Program {
+            commands: vec![Spanned::new(
+                Command::BraceGroup {
+                    commands: vec![make_simple_command("echo", vec!["in brace group"])],
+                },
+                Span::dummy(),
+            )],
+        };
+
+        let result = interpreter.execute(program).unwrap();
+        assert_eq!(result.code, 0);
+        assert_eq!(result.stdout, "in brace group\n");
+    }
+
+    #[test]
+    fn test_nested_compound_commands() {
+        let mut interpreter = Interpreter::new();
+
+        // Test: if true; then { echo "nested"; }; fi
+        let program = Program {
+            commands: vec![Spanned::new(
+                Command::If {
+                    condition: Box::new(make_simple_command("true", vec![])),
+                    then_body: vec![Spanned::new(
+                        Command::BraceGroup {
+                            commands: vec![make_simple_command("echo", vec!["nested"])],
+                        },
+                        Span::dummy(),
+                    )],
+                    elif_clauses: vec![],
+                    else_body: None,
+                },
+                Span::dummy(),
+            )],
+        };
+
+        let result = interpreter.execute(program).unwrap();
+        assert_eq!(result.code, 0);
+        assert_eq!(result.stdout, "nested\n");
     }
 }
